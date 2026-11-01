@@ -1,0 +1,43 @@
+# Build outputs
+build/
+bin/
+out/
+x64/
+Debug/
+Release/
+
+# Compiled Object and Executable files
+*.obj
+*.exe
+*.pdb
+*.idb
+*.ilk
+*.exp
+# Keep OpenCL_sys.lib import stubs
+*.lib
+!OpenCL_sys.lib
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# Large Model weights
+*.gguf
+*.safetensors
+*.bin
+*.ckpt
+*.pt
+*.onnx
+
+# IDE and Editor
+.vs/
+.vscode/
+*.user
+*.suo
+*.VC.db
+*.opendb
+.idea/

@@ -1,0 +1,80 @@
+// vega8_context.h
+// Vega 8 (gfx90c) OpenCL Context and Buffer Management for Zen 3 Engine
+#ifndef VEGA8_CONTEXT_H
+#define VEGA8_CONTEXT_H
+
+#define CL_TARGET_OPENCL_VERSION 200
+#include <CL/cl.h>
+#include <string>
+#include <vector>
+#include <stdexcept>
+#include <iostream>
+
+namespace zen3_engine {
+
+struct Vega8DeviceInfo {
+    std::string platform_name;
+    std::string device_name;
+    std::string driver_version;
+    cl_uint compute_units;
+    cl_uint max_clock_mhz;
+    cl_ulong global_mem_size;
+    cl_ulong local_mem_size;
+    size_t max_work_group_size;
+    cl_uint wavefront_width;
+    bool fp16_supported;
+};
+
+class Vega8Context {
+public:
+    Vega8Context();
+    ~Vega8Context();
+
+    // Prevent copy
+    Vega8Context(const Vega8Context&) = delete;
+    Vega8Context& operator=(const Vega8Context&) = delete;
+
+    // Initialize AMD OpenCL platform and gfx90c device
+    bool init(bool enable_profiling = true);
+
+    // Build OpenCL program from source string or file path
+    cl_program build_program_from_file(const std::string& cl_filepath, const std::string& build_options = "");
+    cl_program build_program_from_source(const std::string& source, const std::string& build_options = "");
+
+    // Create a kernel from compiled program
+    cl_kernel create_kernel(cl_program program, const std::string& kernel_name);
+
+    // Zero-Copy UMA mapping: Wraps host memory in cl_mem without copying across PCIe
+    // Bypasses 4GB WDDM buffer allocation limit by pinning host pages directly.
+    cl_mem wrap_host_buffer(void* host_ptr, size_t size, cl_mem_flags extra_flags = CL_MEM_READ_ONLY);
+
+    // Standard device buffer allocation (if needed)
+    cl_mem allocate_device_buffer(size_t size, cl_mem_flags flags = CL_MEM_READ_WRITE);
+
+    // Synchronize command queue
+    void finish();
+
+    // Getters
+    cl_context get_context() const { return context_; }
+    cl_command_queue get_queue() const { return queue_; }
+    cl_device_id get_device() const { return device_; }
+    const Vega8DeviceInfo& get_device_info() const { return info_; }
+
+    // Utility: Format OpenCL error code
+    static const char* get_error_string(cl_int error);
+
+private:
+    cl_platform_id platform_ = nullptr;
+    cl_device_id device_ = nullptr;
+    cl_context context_ = nullptr;
+    cl_command_queue queue_ = nullptr;
+    Vega8DeviceInfo info_;
+    bool initialized_ = false;
+
+    void query_device_info();
+    void cleanup();
+};
+
+} // namespace zen3_engine
+
+#endif // VEGA8_CONTEXT_H
