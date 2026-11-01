@@ -66,6 +66,7 @@ public:
     bool initialize();
 
     // Benchmarking
+    GrootPrefillResult benchmark_pipelined_prefill(int seq_len);
     GrootPrefillResult benchmark_prefill(int seq_len, int iters = 5);
     GrootDecodeResult  benchmark_decode(int num_tokens);
     GrootVisionResult  benchmark_vision_projector(int iters = 5);
@@ -90,6 +91,13 @@ private:
     cl_kernel  m_kernel_gemm_half2 = nullptr;
     cl_kernel  m_kernel_vision_fp16 = nullptr;
     cl_mem     m_gpu_pool_buffer = nullptr;
+
+    // Stationary L3 Zero-Copy UMA Buffers
+    cl_mem     m_gpu_act_in = nullptr;
+    cl_mem     m_gpu_act_out = nullptr;
+    cl_mem     m_gpu_shexp_out = nullptr;
+    cl_mem     m_gpu_shexp_w = nullptr;
+    cl_mem     m_gpu_attn_w = nullptr;
 
     void update_peak_memory();
     bool setup_opencl();

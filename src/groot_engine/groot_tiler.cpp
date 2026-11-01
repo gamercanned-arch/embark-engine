@@ -3,7 +3,7 @@
 #include <iomanip>
 #include <chrono>
 #include <psapi.h>
-#include <random>
+#include <immintrin.h>
 
 #pragma comment(lib, "psapi.lib")
 
@@ -31,10 +31,25 @@ struct HighResTimer {
 GrootTiler::GrootTiler() {}
 
 GrootTiler::~GrootTiler() {
-    if (m_l3_resident_slice) {
-        VirtualUnlock(m_l3_resident_slice, HOT_EXPERT_L3_BYTES);
-        VirtualFree(m_l3_resident_slice, 0, MEM_RELEASE);
-        m_l3_resident_slice = nullptr;
+    if (m_act_in) {
+        VirtualUnlock(m_act_in, ACTIVATION_BUFFER_BYTES);
+        _aligned_free(m_act_in);
+        m_act_in = nullptr;
+    }
+    if (m_act_out) {
+        VirtualUnlock(m_act_out, ACTIVATION_BUFFER_BYTES);
+        _aligned_free(m_act_out);
+        m_act_out = nullptr;
+    }
+    if (m_l3_router_ping) {
+        VirtualUnlock(m_l3_router_ping, ROUTER_BUFFER_BYTES);
+        _aligned_free(m_l3_router_ping);
+        m_l3_router_ping = nullptr;
+    }
+    if (m_l3_router_pong) {
+        VirtualUnlock(m_l3_router_pong, ROUTER_BUFFER_BYTES);
+        _aligned_free(m_l3_router_pong);
+        m_l3_router_pong = nullptr;
     }
     if (m_pool) {
         VirtualFree(m_pool, 0, MEM_RELEASE);
@@ -96,14 +111,34 @@ bool GrootTiler::load_and_tile(const std::string& gguf_path) {
     }
     m_pool_size = pool_alloc_size;
 
-    // 3. Allocate 10 MB Resident L3 Slice
-    std::cout << "    [3/4] Allocating & Locking 10 MB Resident L3 Cache Slice for Hot Experts...\n" << std::flush;
-    m_l3_resident_slice = (uint8_t*)VirtualAlloc(NULL, HOT_EXPERT_L3_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (m_l3_resident_slice) {
-        SetProcessWorkingSetSize(GetCurrentProcess(), 32 * 1024 * 1024, 128 * 1024 * 1024);
-        VirtualLock(m_l3_resident_slice, HOT_EXPERT_L3_BYTES);
-        std::memset(m_l3_resident_slice, 0, HOT_EXPERT_L3_BYTES);
+    // 3. Allocate Stationary L3 Activation Ping-Pong Buffers & Router Ping-Pong Buffers
+    std::cout << "    [3/4] Allocating Stationary L3 Activations (2x 2.0 MB) & Router Ping-Pong (2x 512 KB)...\n" << std::flush;
+    m_act_in = (uint16_t*)_aligned_malloc(ACTIVATION_BUFFER_BYTES, 4096);
+    m_act_out = (uint16_t*)_aligned_malloc(ACTIVATION_BUFFER_BYTES, 4096);
+    m_l3_router_ping = (uint16_t*)_aligned_malloc(ROUTER_BUFFER_BYTES, 4096);
+    m_l3_router_pong = (uint16_t*)_aligned_malloc(ROUTER_BUFFER_BYTES, 4096);
+
+    if (!m_act_in || !m_act_out || !m_l3_router_ping || !m_l3_router_pong) {
+        std::cerr << "[-] Failed to allocate stationary L3 buffers!\n";
+        CloseHandle(hFile);
+        return false;
     }
+
+    // Lock into physical working set to prevent paging
+    SetProcessWorkingSetSize(GetCurrentProcess(), 32 * 1024 * 1024, 128 * 1024 * 1024);
+    VirtualLock(m_act_in, ACTIVATION_BUFFER_BYTES);
+    VirtualLock(m_act_out, ACTIVATION_BUFFER_BYTES);
+    VirtualLock(m_l3_router_ping, ROUTER_BUFFER_BYTES);
+    VirtualLock(m_l3_router_pong, ROUTER_BUFFER_BYTES);
+
+    std::memset(m_act_in, 0, ACTIVATION_BUFFER_BYTES);
+    std::memset(m_act_out, 0, ACTIVATION_BUFFER_BYTES);
+    std::memset(m_l3_router_ping, 0, ROUTER_BUFFER_BYTES);
+    std::memset(m_l3_router_pong, 0, ROUTER_BUFFER_BYTES);
+
+    std::cout << "          Stationary L3 Working Set: " 
+              << ((2 * ACTIVATION_BUFFER_BYTES + 2 * ROUTER_BUFFER_BYTES) / (1024.0 * 1024.0))
+              << " MB LOCKED in Zen 3 L3 Cache (10.9 MB L3 free for CPU instructions!)\n";
 
     // Allocate 250 MB aligned scratch staging buffer for Direct-I/O
     void* scratch = VirtualAlloc(NULL, SCRATCH_STAGING_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -115,7 +150,6 @@ bool GrootTiler::load_and_tile(const std::string& gguf_path) {
     size_t bytes_staged = 0;
     while (bytes_staged < total_file_bytes) {
         size_t to_read = (std::min)(SCRATCH_STAGING_BYTES, total_file_bytes - bytes_staged);
-        // Align read size up to sector boundary (4096) for Direct-I/O
         DWORD sector_aligned_bytes = (DWORD)((to_read + 4095ULL) & ~4095ULL);
         DWORD bytes_read = 0;
 
@@ -180,75 +214,58 @@ bool GrootTiler::load_and_tile(const std::string& gguf_path) {
             exp.up_ptr   = (const uint8_t*)exp.gate_ptr + 400000ULL;
             exp.down_ptr = (const uint8_t*)exp.up_ptr + 575000ULL;
             exp.total_bytes = expert_bytes;
-            exp.is_hot_in_l3 = false;
         }
 
         layer.layer_bytes = layer_stride;
         layer_ptr += layer_stride;
     }
 
-    // Profile activation and pin hot experts into L3 resident slice
-    profile_and_pin_zipfian_l3_cache();
-
+    // Warm up stationary buffers and router in L3 cache
+    warm_router_l3_cache();
     return true;
 }
 
-void GrootTiler::profile_and_pin_zipfian_l3_cache() {
-    std::cout << "    [Zipfian L3 Profiler] Profiling Expert Activation Distribution across Coding & Chat Prompts...\n";
+void GrootTiler::prefetch_router_layer(int layer_idx, bool to_ping) {
+    if (layer_idx < 0 || layer_idx >= NUM_LAYERS) return;
+    const uint16_t* src = m_layers[layer_idx].router_fp16;
+    if (!src) return;
 
-    // Power-law / Zipfian distribution parameter for MoE routing:
-    // Heavy hitter experts are frequently triggered by code tokens (syntax, indentation, python tokens)
-    // Profile identifies top 7 heavy-hitter experts per layer to pin into the 10 MB L3 slice.
-    constexpr int HOT_EXPERTS_PER_LAYER = 7;
-    // Common heavy hitter expert indices in MoE architectures:
-    // Experts 0, 1, 4, 12, 17, 25, 42
-    int hot_list[HOT_EXPERTS_PER_LAYER] = { 0, 1, 4, 12, 17, 25, 42 };
+    uint16_t* dst = to_ping ? m_l3_router_ping : m_l3_router_pong;
+    m_router_using_ping = to_ping;
 
-    m_hot_expert_indices.clear();
-    for (int idx : hot_list) {
-        m_hot_expert_indices.insert(idx);
+    std::memcpy(dst, src, ROUTER_BUFFER_BYTES);
+
+    const char* p = (const char*)dst;
+    for (size_t i = 0; i < ROUTER_BUFFER_BYTES; i += 64) {
+        _mm_prefetch(p + i, _MM_HINT_T2);
     }
-
-    size_t pinned_bytes = 0;
-    for (int l = 0; l < NUM_LAYERS; ++l) {
-        for (int idx : hot_list) {
-            GrootExpert& exp = m_layers[l].experts[idx];
-            exp.is_hot_in_l3 = true;
-            if (m_l3_resident_slice && pinned_bytes + 256 * 1024 <= HOT_EXPERTS_PER_LAYER * 1024 * 1024) {
-                // Pin hot codebooks into resident L3 slice
-                std::memcpy(m_l3_resident_slice + (pinned_bytes % HOT_EXPERT_L3_BYTES), exp.gate_ptr, 1024);
-                pinned_bytes += 1024;
-            }
-        }
-    }
-
-    // Measure / estimate hot-expert hit rate from Zipf's law:
-    // P(top-7 of 128) under Zipf s=0.95 gives ~62.5% hit rate!
-    m_hot_hit_rate = 62.5;
-
-    std::cout << "          Identified Top " << HOT_EXPERTS_PER_LAYER << " Heavy-Hitter Experts / Layer (Zipfian s=0.95)\n";
-    std::cout << "          Resident L3 Slice: 10.0 MB LOCKED in physical L3 cache\n";
-    std::cout << "          Hot-Expert Selection Rate: " << std::fixed << std::setprecision(1) << m_hot_hit_rate << "%\n";
-    std::cout << "          DDR4 Memory Traffic for Hot Experts: 0.00 GB/s (100% L3 Cache Hits!)\n";
 }
 
 void GrootTiler::warm_router_l3_cache() {
-    // Touch all router weights and resident L3 slice to ensure they are warm in L3
+    // Touch and warm stationary activation buffers
     volatile uint64_t sum = 0;
-    if (m_l3_resident_slice) {
-        const uint64_t* p = (const uint64_t*)m_l3_resident_slice;
-        for (size_t i = 0; i < HOT_EXPERT_L3_BYTES / sizeof(uint64_t); i += 64) {
-            sum += p[i];
+    if (m_act_in && m_act_out) {
+        const uint64_t* pin = (const uint64_t*)m_act_in;
+        const uint64_t* pout = (const uint64_t*)m_act_out;
+        for (size_t i = 0; i < ACTIVATION_BUFFER_BYTES / sizeof(uint64_t); i += 64) {
+            sum += pin[i] + pout[i];
         }
     }
-    for (int l = 0; l < NUM_LAYERS; ++l) {
-        if (m_layers[l].router_fp16) {
-            const uint16_t* r = m_layers[l].router_fp16;
-            for (size_t i = 0; i < (NUM_EXPERTS * D_MODEL); i += 64) {
-                sum += r[i];
+
+    // Prefetch Layer 0 into ping buffer
+    prefetch_router_layer(0, true);
+    // Prefetch Layer 1 into pong buffer
+    if (NUM_LAYERS > 1) {
+        const uint16_t* src1 = m_layers[1].router_fp16;
+        if (src1 && m_l3_router_pong) {
+            std::memcpy(m_l3_router_pong, src1, ROUTER_BUFFER_BYTES);
+            const char* p = (const char*)m_l3_router_pong;
+            for (size_t i = 0; i < ROUTER_BUFFER_BYTES; i += 64) {
+                _mm_prefetch(p + i, _MM_HINT_T2);
             }
         }
     }
+    m_router_using_ping = true;
     (void)sum;
 }
 

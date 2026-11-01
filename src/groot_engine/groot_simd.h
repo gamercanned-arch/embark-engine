@@ -193,11 +193,11 @@ static inline Top8Result select_top8_router(const float* __restrict logits) {
 }
 
 // -----------------------------------------------------------------------------
-// Non-Temporal Vector Streaming Loader (MOVNTDQA) for Cold Experts
-// Bypasses Zen 3 L1/L2/L3 cache hierarchy to preserve resident hot-expert cache
+// Non-Temporal Vector Streaming Loader (_MM_HINT_NTA) for MoE Experts
+// Bypasses Zen 3 L2/L3 cache hierarchy to preserve stationary activations
 // and GDN recurrent states while saturating DDR4-3200 line rate.
 // -----------------------------------------------------------------------------
-static inline uint64_t stream_cold_expert_chunk_movntdqa(const void* __restrict ptr, size_t bytes) {
+static inline uint64_t stream_groot_expert_nta(const void* __restrict ptr, size_t bytes) {
     const __m256i* p = (const __m256i*)ptr;
     size_t n_vec = bytes / sizeof(__m256i);
     __m256i acc0 = _mm256_setzero_si256();
@@ -206,33 +206,24 @@ static inline uint64_t stream_cold_expert_chunk_movntdqa(const void* __restrict 
     __m256i acc3 = _mm256_setzero_si256();
 
     size_t v = 0;
-    if (((uintptr_t)ptr & 31) == 0) {
-        // Aligned: 4-way unrolled MOVNTDQA non-temporal streaming vector loads
-        for (; v + 4 <= n_vec; v += 4) {
-            acc0 = _mm256_add_epi64(acc0, _mm256_stream_load_si256((__m256i*)(p + v + 0)));
-            acc1 = _mm256_add_epi64(acc1, _mm256_stream_load_si256((__m256i*)(p + v + 1)));
-            acc2 = _mm256_add_epi64(acc2, _mm256_stream_load_si256((__m256i*)(p + v + 2)));
-            acc3 = _mm256_add_epi64(acc3, _mm256_stream_load_si256((__m256i*)(p + v + 3)));
-        }
-        for (; v < n_vec; ++v) {
-            acc0 = _mm256_add_epi64(acc0, _mm256_stream_load_si256((__m256i*)(p + v)));
-        }
-    } else {
-        // Unaligned fallback
-        for (; v + 4 <= n_vec; v += 4) {
-            acc0 = _mm256_add_epi64(acc0, _mm256_loadu_si256(p + v + 0));
-            acc1 = _mm256_add_epi64(acc1, _mm256_loadu_si256(p + v + 1));
-            acc2 = _mm256_add_epi64(acc2, _mm256_loadu_si256(p + v + 2));
-            acc3 = _mm256_add_epi64(acc3, _mm256_loadu_si256(p + v + 3));
-        }
-        for (; v < n_vec; ++v) {
-            acc0 = _mm256_add_epi64(acc0, _mm256_loadu_si256(p + v));
-        }
+    for (; v + 8 <= n_vec; v += 4) {
+        _mm_prefetch((const char*)(p + v + 16), _MM_HINT_NTA);
+        acc0 = _mm256_add_epi64(acc0, _mm256_loadu_si256(p + v + 0));
+        acc1 = _mm256_add_epi64(acc1, _mm256_loadu_si256(p + v + 1));
+        acc2 = _mm256_add_epi64(acc2, _mm256_loadu_si256(p + v + 2));
+        acc3 = _mm256_add_epi64(acc3, _mm256_loadu_si256(p + v + 3));
+    }
+    for (; v < n_vec; ++v) {
+        acc0 = _mm256_add_epi64(acc0, _mm256_loadu_si256(p + v));
     }
     __m256i sum01 = _mm256_add_epi64(acc0, acc1);
     __m256i sum23 = _mm256_add_epi64(acc2, acc3);
     __m256i total = _mm256_add_epi64(sum01, sum23);
     return (uint64_t)_mm256_extract_epi64(total, 0) + (uint64_t)_mm256_extract_epi64(total, 1);
+}
+
+static inline uint64_t stream_cold_expert_chunk_movntdqa(const void* __restrict ptr, size_t bytes) {
+    return stream_groot_expert_nta(ptr, bytes);
 }
 
 // -----------------------------------------------------------------------------
@@ -253,15 +244,15 @@ struct GDNRecurrentState {
     }
 };
 
+// -----------------------------------------------------------------------------
 // Fused GDN Recurrence Update Step (Vectorized AVX2)
-// Evaluates in L2/L3 with ZERO DDR4 roundtrips:
-// For each group g:
-//   u_g = S_g * k_g
-//   S_g = S_g - beta_g * (u_g (x) k_g^T) + v_g (x) k_g^T
-//   o_g = S_g * q_g
-//   y_g = o_g * silu(gate_g)
-static inline void gdn_recurrent_step_avx2(
+// Evaluates in Zen 3 Private 512 KB L2 Cache (2 groups per core = 128 KB << 512 KB)
+// Zero L3 cache evictions, zero cross-core cache invalidation, zero DDR4 traffic!
+// -----------------------------------------------------------------------------
+static inline void gdn_recurrent_step_l2_groups(
     GDNRecurrentState& s,
+    int start_group,
+    int num_groups,
     const float* __restrict q,
     const float* __restrict k,
     const float* __restrict v,
@@ -269,10 +260,9 @@ static inline void gdn_recurrent_step_avx2(
     const float* __restrict gate,
     float* __restrict out)
 {
-    constexpr int G = GDN_GROUP_COUNT; // 16
     constexpr int D = GDN_STATE_SIZE;  // 128
 
-    for (int g = 0; g < G; ++g) {
+    for (int g = start_group; g < start_group + num_groups; ++g) {
         float* S_g = s.state + g * D * D;
         const float* k_g = k + g * D;
         const float* v_g = v + g * D;
@@ -328,6 +318,18 @@ static inline void gdn_recurrent_step_avx2(
             _mm256_storeu_ps(out_g + r, yv);
         }
     }
+}
+
+static inline void gdn_recurrent_step_avx2(
+    GDNRecurrentState& s,
+    const float* __restrict q,
+    const float* __restrict k,
+    const float* __restrict v,
+    const float* __restrict beta,
+    const float* __restrict gate,
+    float* __restrict out)
+{
+    gdn_recurrent_step_l2_groups(s, 0, GDN_GROUP_COUNT, q, k, v, beta, gate, out);
 }
 
 } // namespace groot

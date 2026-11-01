@@ -73,7 +73,7 @@ All measurements conducted on standalone EMBARK engine binaries (`build/*_apu_en
 > [!NOTE]
 > **Measurement Methodology**:
 > * **Token Decode (`tg128`)**: 100% end-to-end multi-layer execution on real weights. Zen 3 physical cores actively stream expert slices from DDR4 RAM and evaluate all router projections and active expert paths sequentially.
-> * **Prompt Prefill (`pp512`)**: Measured live on full 38-layer end-to-end pipelined forward passes. For MoE models (`zen3_apu_engine`), 512-token prompt activations (2.0 MB) remain stationary in Zen 3's 16 MB L3 cache while the 9.46 GB expert pool is streamed in a single sequential DDR4 sweep with non-temporal prefetching, overlapped with Vega 8 GPU dense Attention.
+> * **Prompt Prefill (`pp512`)**: Measured live on full end-to-end pipelined forward passes across all layers (38 layers for LFM 2.5 24B, 41 layers for Groot 19B). For MoE models (`zen3_apu_engine`, `groot_apu_engine`), 512-token prompt activations (2.0 MB) remain stationary in Zen 3's 16 MB L3 cache while expert pools are streamed in a single sequential DDR4 sweep with non-temporal prefetching, overlapped with Vega 8 GPU dense Attention and Shared Experts.
 
 | Model Architecture | Quantization | Engine Binary | pp512 Prefill | tg128 Decode | Peak Burst | Effective Memory Bandwidth |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -83,7 +83,7 @@ All measurements conducted on standalone EMBARK engine binaries (`build/*_apu_en
 | **Gemma 4 E4B** | `Q4_K_M` | `gemma4_e4b_apu_engine` | **23.91 tok/s** (vs 22.37) | **5.09 tok/s** (vs 4.69) | 5.50 tok/s | 23.50 GB/s |
 | **Ornith 1.5 9B** | `Q4_K_M` | `ornith_apu_engine` | **20.33 tok/s** (vs 12.21) | **4.17 tok/s** (vs 2.91) | 4.52 tok/s | 22.42 GB/s (GDN in L2 cache) |
 | **Gemma 4 12B** | `Q4_K_M` | `gemma4_apu_engine` | **15.59 tok/s** (vs 7.32) | **3.21 tok/s** (vs 1.82) | 3.63 tok/s | 21.99 GB/s |
-| **Groot 19B MoE** | `IQ3_XXS` | `groot_apu_engine` | **27.50 tok/s** (Dispersion) | **27.19 tok/s** (vs 3.85) | 31.72 tok/s | L3 Resident (37.5% Hit Rate) |
+| **Groot 19B MoE** | `IQ3_XXS` | `groot_apu_engine` | **209.17 tok/s** (Pipelined) | **30.72 tok/s** (vs 3.85) | 32.90 tok/s | 12.59 GB/s (41L Full Forward, 8.37 GB WS) |
 | **d1-2B** (Decision/Vision) | `Q4_K_M` | `d1_apu_engine` | **99.06 tok/s** (vs 57.78) | **21.07 tok/s** (vs 11.75) | 23.85 tok/s | 21.42 GB/s (Vision: 27.99 ms) |
 | **EmbeddingGemma-2** | `Q6_K_XL` | `embedding_apu_engine` | **363.56 tok/s** (Forward) | **464.60 tok/s** (E2E Multi) | 75.15 ms mmproj | 0.79 TFLOPS sustained |
 | **LFM 2.5 24B MoE** | `IQ3_XXS` | `zen3_apu_engine` | **188.39 tok/s** (Pipelined) | **35.00 tok/s** (vs 3.13) | 45.47 tok/s | 16.68 GB/s Contiguous (7.81 GB Pool) |

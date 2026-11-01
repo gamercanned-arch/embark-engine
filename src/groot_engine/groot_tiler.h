@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
-#include <unordered_set>
+#include <algorithm>
 #include "groot_simd.h"
 
 namespace groot {
@@ -20,7 +20,11 @@ namespace groot {
 // Contiguous pool: ~9.2 GiB (fits within 16 GB RAM envelope with 0 swapping)
 constexpr size_t GROOT_POOL_SIZE = 9880000000ULL; // ~9.20 GiB
 constexpr size_t SCRATCH_STAGING_BYTES = 250ULL * 1024ULL * 1024ULL; // 250 MB Direct-I/O staging
-constexpr size_t HOT_EXPERT_L3_BYTES = 10ULL * 1024ULL * 1024ULL;    // 10 MB Resident L3 Slice
+
+// Stationary L3 Cache Resident Buffers (Total: ~5.0 MB << 16 MB L3)
+// Leaves > 10.9 MB L3 entirely free for OS and Zen 3 CPU execution
+constexpr size_t ACTIVATION_BUFFER_BYTES = 512ULL * D_MODEL * sizeof(uint16_t); // 2.0 MB (M=512, D=2048)
+constexpr size_t ROUTER_BUFFER_BYTES = NUM_EXPERTS * D_MODEL * sizeof(uint16_t); // 512 KB (128x2048)
 
 enum class GrootLayerType {
     GDN_LINEAR,
@@ -33,7 +37,6 @@ struct GrootExpert {
     const void* up_ptr   = nullptr; // IQ4_XS  [2048, 512] (~544 KB)
     const void* down_ptr = nullptr; // IQ4_XS  [512, 2048] (~544 KB)
     size_t total_bytes   = 0;       // ~1.48 MB
-    bool is_hot_in_l3    = false;   // Pinned in 10 MB L3 Resident Cache
 };
 
 struct GrootLayer {
@@ -68,7 +71,7 @@ struct GrootLayer {
     const void*  ffn_down_shexp = nullptr;     // Q8_0 [512, 2048]
     const float* ffn_gate_inp_shexp = nullptr; // F32 [2048]
 
-    // 128 MoE Experts
+    // 128 MoE Experts (~1.48 MB each = 189.4 MB / layer)
     GrootExpert experts[NUM_EXPERTS];
 
     size_t layer_bytes = 0;
@@ -85,11 +88,16 @@ public:
     // Load GGUF model via Win32 Direct-I/O bypass into contiguous ~9.2 GiB memory pool
     bool load_and_tile(const std::string& gguf_path);
 
-    // Profile activation frequencies across coding/chat tokens and pin heavy-hitters into 10 MB L3 slice
-    void profile_and_pin_zipfian_l3_cache();
-
-    // Warm router weights in L3 cache
+    // Warm router weights and stationary buffers in L3 cache
     void warm_router_l3_cache();
+
+    // Prefetch router weights for next layer into the non-active ping-pong L3 buffer
+    void prefetch_router_layer(int layer_idx, bool to_ping);
+
+    // Swap stationary L3 activation buffers (zero copy pointer swap)
+    void swap_activation_buffers() {
+        std::swap(m_act_in, m_act_out);
+    }
 
     // Prefault memory pool
     void prefault_pool();
@@ -107,10 +115,11 @@ public:
     const float* get_output_norm() const { return m_output_norm; }
     const void* get_output_weight() const { return m_output_weight; }
 
-    // Zipfian Hot-Expert Telemetry
-    double get_hot_expert_hit_rate() const { return m_hot_hit_rate; }
-    size_t get_pinned_hot_expert_count() const { return m_hot_expert_indices.size(); }
-    const uint8_t* get_l3_resident_slice() const { return m_l3_resident_slice; }
+    // Stationary L3 Buffer Accessors
+    uint16_t* get_act_in() const { return m_act_in; }
+    uint16_t* get_act_out() const { return m_act_out; }
+    const uint16_t* get_l3_router_active() const { return m_router_using_ping ? m_l3_router_ping : m_l3_router_pong; }
+    bool is_router_using_ping() const { return m_router_using_ping; }
 
 private:
     uint8_t* m_pool = nullptr;
@@ -119,10 +128,14 @@ private:
     double m_load_time_sec = 0.0;
     size_t m_peak_ws_bytes = 0;
 
-    // Pinned 10 MB Resident L3 Cache Slice
-    uint8_t* m_l3_resident_slice = nullptr;
-    std::unordered_set<int> m_hot_expert_indices;
-    double m_hot_hit_rate = 0.0;
+    // Stationary L3 Activation Ping-Pong Buffers (2x 2.0 MB)
+    uint16_t* m_act_in = nullptr;
+    uint16_t* m_act_out = nullptr;
+
+    // Stationary L3 Router Ping-Pong Buffers (2x 512 KB)
+    uint16_t* m_l3_router_ping = nullptr;
+    uint16_t* m_l3_router_pong = nullptr;
+    bool m_router_using_ping = true;
 
     // Model Architecture
     GrootLayer m_layers[NUM_LAYERS];

@@ -17,11 +17,12 @@ namespace groot {
 
 constexpr int NUM_WORKERS = 8;
 
+struct GrootExpert; // Forward decl
+
 struct ExpertStreamJob {
     const uint8_t* expert_ptr = nullptr;
     size_t expert_bytes = 0;
     int expert_idx = 0;
-    bool is_hot_l3 = false; // If true: pinned in resident 10 MB L3 slice (0 GB/s DDR4 fetch!)
 };
 
 class GrootThreadPool {
@@ -33,7 +34,6 @@ public:
     GrootThreadPool& operator=(const GrootThreadPool&) = delete;
 
     // Dispatches the 8 active experts across the 8 pinned physical cores
-    // 1 physical core per active expert!
     void stream_active_8_experts(const ExpertStreamJob jobs[EXPERTS_PER_TOKEN]);
 
     // Dispatch custom parallel lambda across 8 pinned physical workers
@@ -41,6 +41,27 @@ public:
 
     // Contiguous block streaming across all 8 cores
     void stream_contiguous_block(const void* ptr, size_t total_bytes);
+
+    // Stationary L3 Prefill MoE Kernel: distributes active prompt tokens for expert e across 8 cores
+    void compute_expert_stationary_l3(
+        const GrootExpert& expert,
+        const int* token_indices,
+        int num_tokens,
+        const float* token_weights,
+        const uint16_t* act_in,
+        uint16_t* act_out
+    );
+
+    // Parallel GDN Recurrent Step: assigns 2 heads per core (128 KB/core in private L2)
+    void parallel_gdn_step(
+        GDNRecurrentState& s,
+        const float* q,
+        const float* k,
+        const float* v,
+        const float* beta,
+        const float* gate,
+        float* out
+    );
 
     uint64_t get_total_sink() const;
 

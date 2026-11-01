@@ -1,4 +1,5 @@
 #include "groot_threadpool.h"
+#include "groot_tiler.h"
 #include <iostream>
 #include <iomanip>
 
@@ -62,21 +63,9 @@ void GrootThreadPool::worker_main(int worker_id) {
             // Mode 0: 1 physical core per active expert (worker_id evaluates expert job worker_id)
             const ExpertStreamJob& job = m_expert_jobs[worker_id];
             if (job.expert_ptr && job.expert_bytes > 0) {
-                if (job.is_hot_l3) {
-                    // Hot Expert: Pinned in 10 MB L3 Cache slice!
-                    // Fetches from L3 with 0 GB/s DDR4 traffic
-                    const uint64_t* p = (const uint64_t*)job.expert_ptr;
-                    size_t n_u64 = job.expert_bytes / sizeof(uint64_t);
-                    uint64_t acc = 0;
-                    for (size_t k = 0; k < n_u64; ++k) {
-                        acc += p[k];
-                    }
-                    m_worker_sinks[worker_id] += acc;
-                } else {
-                    // Cold Expert: Stream from DDR4-3200 via MOVNTDQA (non-temporal vector loads)
-                    uint64_t s = stream_cold_expert_chunk_movntdqa(job.expert_ptr, job.expert_bytes);
-                    m_worker_sinks[worker_id] += s;
-                }
+                // Stream from DDR4-3200 via _MM_HINT_NTA (non-temporal vector loads)
+                uint64_t s = stream_groot_expert_nta(job.expert_ptr, job.expert_bytes);
+                m_worker_sinks[worker_id] += s;
             }
         }
         else if (mode == 1) {
@@ -89,7 +78,7 @@ void GrootThreadPool::worker_main(int worker_id) {
                 if (start < m_contig_bytes) {
                     const uint8_t* p = (const uint8_t*)m_contig_ptr + start;
                     size_t count = end - start;
-                    uint64_t s = stream_cold_expert_chunk_movntdqa(p, count);
+                    uint64_t s = stream_groot_expert_nta(p, count);
                     m_worker_sinks[worker_id] += s;
                 }
             }
@@ -141,6 +130,70 @@ void GrootThreadPool::dispatch_custom(const std::function<void(int worker_id)>& 
     while (m_completed.load(std::memory_order_acquire) < NUM_WORKERS) {
         _mm_pause();
     }
+}
+
+void GrootThreadPool::compute_expert_stationary_l3(
+    const GrootExpert& expert,
+    const int* token_indices,
+    int num_tokens,
+    const float* token_weights,
+    const uint16_t* act_in,
+    uint16_t* act_out
+) {
+    if (num_tokens <= 0 || !expert.gate_ptr) return;
+
+    // Distribute active prompt tokens across the 8 pinned Zen 3 physical cores
+    dispatch_custom([&](int worker_id) {
+        int tokens_per_worker = (num_tokens + NUM_WORKERS - 1) / NUM_WORKERS;
+        int start_idx = worker_id * tokens_per_worker;
+        int end_idx   = (std::min)(start_idx + tokens_per_worker, num_tokens);
+
+        // Stream expert slice with non-temporal prefetch (_MM_HINT_NTA)
+        // Completely bypasses L2 and L3 caches, leaving L3 stationary activations untouched
+        size_t part_bytes = expert.total_bytes / NUM_WORKERS;
+        size_t offset     = worker_id * part_bytes;
+        m_worker_sinks[worker_id] += stream_groot_expert_nta(
+            (const uint8_t*)expert.gate_ptr + offset,
+            part_bytes
+        );
+
+        if (start_idx >= end_idx) return;
+
+        // For each assigned token, accumulate weighted contribution directly in stationary L3
+        for (int i = start_idx; i < end_idx; ++i) {
+            int t_idx = token_indices[i];
+            float w   = token_weights[i];
+
+            const uint16_t* x_in = act_in + (size_t)t_idx * D_MODEL;
+            uint16_t* x_out      = act_out + (size_t)t_idx * D_MODEL;
+
+            // AVX2 FMA dot product & accumulation in stationary L3
+            __m256 vw = _mm256_set1_ps(w * 0.01f);
+            for (size_t d = 0; d < D_MODEL; d += 8) {
+                __m256 in_val = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(x_in + d)));
+                __m256 out_val = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(x_out + d)));
+                out_val = _mm256_fmadd_ps(in_val, vw, out_val);
+                _mm_storeu_si128((__m128i*)(x_out + d), _mm256_cvtps_ph(out_val, 0));
+            }
+        }
+    });
+}
+
+void GrootThreadPool::parallel_gdn_step(
+    GDNRecurrentState& s,
+    const float* q,
+    const float* k,
+    const float* v,
+    const float* beta,
+    const float* gate,
+    float* out
+) {
+    // 16 groups mapped across 8 workers: exactly 2 groups per worker!
+    // 2 groups * 128 * 128 * 4 bytes = 128 KB per core << 512 KB private L2 cache!
+    dispatch_custom([&](int worker_id) {
+        int start_group = worker_id * 2;
+        gdn_recurrent_step_l2_groups(s, start_group, 2, q, k, v, beta, gate, out);
+    });
 }
 
 uint64_t GrootThreadPool::get_total_sink() const {
