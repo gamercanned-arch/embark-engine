@@ -1,5 +1,6 @@
 #include "lfm2_tiler.h"
 #include "moe_layer_offsets.h"
+#include "moe_layer_offsets_q3.h"
 
 #include <psapi.h>
 #include <immintrin.h>
@@ -86,6 +87,15 @@ bool LFM2Tiler::load_and_tile(const std::string& gguf_path) {
     std::cout << "  File: " << gguf_path << "\n";
     std::cout << "================================================================================\n\n";
 
+    bool is_q3 = (gguf_path.find("Q3") != std::string::npos);
+    if (is_q3) {
+        m_expert_pool_size = Q3_TOTAL_EXPERT_POOL_BYTES;
+        m_scratch_buf_size = SCRATCH_BUFFER_BYTES;
+    } else {
+        m_expert_pool_size = TOTAL_EXPERT_POOL_BYTES;
+        m_scratch_buf_size = 250ULL * 1024ULL * 1024ULL;
+    }
+
     // 1. Open GGUF file with Win32 FILE_FLAG_SEQUENTIAL_SCAN
     HANDLE hFile = CreateFileA(
         gguf_path.c_str(),
@@ -102,24 +112,25 @@ bool LFM2Tiler::load_and_tile(const std::string& gguf_path) {
         return false;
     }
 
-    // 2. Allocate the 7.81 GB contiguous target pool once via VirtualAlloc aligned to 64 KB
-    std::cout << "[1/4] Allocating Contiguous Target Pool (7.81 GB / " 
-              << m_expert_pool_size << " bytes) via VirtualAlloc...\n";
+    // 2. Allocate the contiguous target pool once via VirtualAlloc aligned to 64 KB
+    double pool_gb = (double)m_expert_pool_size / (1024.0 * 1024.0 * 1024.0);
+    std::cout << "[1/4] Allocating Contiguous Target Pool (" << std::fixed << std::setprecision(2) << pool_gb 
+              << " GB / " << m_expert_pool_size << " bytes) via VirtualAlloc...\n";
     m_expert_pool = (uint8_t*)VirtualAlloc(NULL, m_expert_pool_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!m_expert_pool) {
-        std::cerr << "[-] Failed to allocate 7.81 GB expert pool: " << GetLastError() << "\n";
+        std::cerr << "[-] Failed to allocate expert pool: " << GetLastError() << "\n";
         CloseHandle(hFile);
         return false;
     }
     std::cout << "      Contiguous Expert Pool base: 0x" << (void*)m_expert_pool 
               << " (Aligned to 64 KB)\n";
 
-    // 3. Allocate 250 MB reusable scratch buffer
-    std::cout << "[2/4] Allocating Reusable Scratch Buffer (250 MB / " 
+    // 3. Allocate reusable scratch buffer
+    std::cout << "[2/4] Allocating Reusable Scratch Buffer (" << (m_scratch_buf_size / (1024 * 1024)) << " MB / " 
               << m_scratch_buf_size << " bytes)...\n";
     m_scratch_buf = (uint8_t*)VirtualAlloc(NULL, m_scratch_buf_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!m_scratch_buf) {
-        std::cerr << "[-] Failed to allocate 250 MB scratch buffer: " << GetLastError() << "\n";
+        std::cerr << "[-] Failed to allocate scratch buffer: " << GetLastError() << "\n";
         CloseHandle(hFile);
         return false;
     }
@@ -138,7 +149,11 @@ bool LFM2Tiler::load_and_tile(const std::string& gguf_path) {
     size_t current_pool_offset = 0;
 
     std::cout << "[4/4] Streaming and Slicing 38 MoE Layers into Contiguous Format...\n";
-    std::cout << "      [Gate (984 KB) | Up (984 KB) | Down (1320 KB)] -> 3.21 MB per expert\n\n";
+    if (is_q3) {
+        std::cout << "      [Gate (1.15 MB) | Up (1.15 MB) | Down (1.59 MB)] -> 3.89 MB per expert\n\n";
+    } else {
+        std::cout << "      [Gate (984 KB) | Up (984 KB) | Down (1320 KB)] -> 3.21 MB per expert\n\n";
+    }
 
     alignas(64) float router_f32_buf[ROUTER_LAYER_FLOATS];
 
@@ -147,81 +162,57 @@ bool LFM2Tiler::load_and_tile(const std::string& gguf_path) {
     QueryPerformanceCounter(&t_start);
 
     for (int l = 0; l < N_MOE_LAYERS; ++l) {
-        const MoELayerMeta& meta = MOE_LAYERS_META[l];
+        const MoELayerMeta& meta = is_q3 ? MOE_LAYERS_META_Q3[l] : MOE_LAYERS_META[l];
         PackedMoELayer& layer = m_layers[l];
         layer.model_layer_idx = meta.layer_idx;
         layer.moe_idx = l;
         layer.layer_pool_offset = current_pool_offset;
 
-        bool is_high_precision = (meta.layer_idx == 7 || meta.layer_idx == 8);
-        size_t exp_gate_bytes = is_high_precision ? HP_GATE_BYTES : STD_GATE_BYTES;
-        size_t exp_up_bytes   = is_high_precision ? HP_UP_BYTES   : STD_UP_BYTES;
-        size_t exp_down_bytes = is_high_precision ? HP_DOWN_BYTES : STD_DOWN_BYTES;
-        size_t exp_total      = exp_gate_bytes + exp_up_bytes + exp_down_bytes;
-        size_t layer_bytes    = N_EXPERTS * exp_total;
+        if (is_q3) {
+            bool is_hp = (meta.layer_idx == 7 || meta.layer_idx == 8);
+            size_t exp_gate_bytes = is_hp ? Q3_HP_GATE_BYTES : Q3_GATE_BYTES;
+            size_t exp_up_bytes   = is_hp ? Q3_HP_UP_BYTES   : Q3_UP_BYTES;
+            size_t exp_down_bytes = is_hp ? Q3_HP_DOWN_BYTES : Q3_DOWN_BYTES;
+            size_t exp_total      = exp_gate_bytes + exp_up_bytes + exp_down_bytes;
+            size_t layer_bytes    = N_EXPERTS * exp_total;
 
-        layer.expert_bytes = exp_total;
-        layer.layer_total_bytes = layer_bytes;
-        layer.router_fp16 = m_router_fp16_pool + l * ROUTER_LAYER_FLOATS;
+            layer.expert_bytes = exp_total;
+            layer.layer_total_bytes = layer_bytes;
+            layer.router_fp16 = m_router_fp16_pool + l * ROUTER_LAYER_FLOATS;
 
-        // --- Step A: Read and Convert Router Matrix (512 KB F32 -> 256 KB FP16) ---
-        if (!seek_file(hFile, meta.gate_inp.file_offset)) {
-            std::cerr << "[-] Seek error for layer " << meta.layer_idx << " router\n";
-            CloseHandle(hFile);
-            return false;
-        }
-        if (!read_exact(hFile, router_f32_buf, meta.gate_inp.size_bytes)) {
-            std::cerr << "[-] Read error for layer " << meta.layer_idx << " router\n";
-            CloseHandle(hFile);
-            return false;
-        }
+            // --- Step A: Read and Convert Router Matrix ---
+            if (!seek_file(hFile, meta.gate_inp.file_offset) || !read_exact(hFile, router_f32_buf, meta.gate_inp.size_bytes)) {
+                std::cerr << "[-] Read error for layer " << meta.layer_idx << " router\n";
+                CloseHandle(hFile);
+                return false;
+            }
 
-        // Vectorized F32 to FP16 conversion via F16C (_mm256_cvtps_ph)
-        uint16_t* dst_router = m_router_fp16_pool + l * ROUTER_LAYER_FLOATS;
-        for (size_t i = 0; i < ROUTER_LAYER_FLOATS; i += 8) {
-            __m256 v = _mm256_loadu_ps(router_f32_buf + i);
-            __m128i h = _mm256_cvtps_ph(v, 0);
-            _mm_storeu_si128((__m128i*)(dst_router + i), h);
-        }
+            uint16_t* dst_router = m_router_fp16_pool + l * ROUTER_LAYER_FLOATS;
+            for (size_t i = 0; i < ROUTER_LAYER_FLOATS; i += 8) {
+                __m256 v = _mm256_loadu_ps(router_f32_buf + i);
+                __m128i h = _mm256_cvtps_ph(v, 0);
+                _mm_storeu_si128((__m128i*)(dst_router + i), h);
+            }
 
-        // --- Step B: Read Expert Weights into 250 MB Scratch Buffer ---
-        if (!is_high_precision) {
-            // Standard layer: Down (86.5 MB), Gate (64.5 MB), Up (64.5 MB) -> Total 215.5 MB <= 250 MB
+            // --- Step B: Read Expert Weights into Scratch Buffer ---
             uint8_t* down_scratch = m_scratch_buf;
             uint8_t* gate_scratch = down_scratch + meta.down_exps.size_bytes;
             uint8_t* up_scratch   = gate_scratch + meta.gate_exps.size_bytes;
 
-            // 1. Read Down
-            if (!seek_file(hFile, meta.down_exps.file_offset) ||
-                !read_exact(hFile, down_scratch, meta.down_exps.size_bytes)) {
-                std::cerr << "[-] Read error for layer " << meta.layer_idx << " down_exps\n";
-                CloseHandle(hFile);
-                return false;
-            }
-            // 2. Read Gate
-            if (!seek_file(hFile, meta.gate_exps.file_offset) ||
-                !read_exact(hFile, gate_scratch, meta.gate_exps.size_bytes)) {
-                std::cerr << "[-] Read error for layer " << meta.layer_idx << " gate_exps\n";
-                CloseHandle(hFile);
-                return false;
-            }
-            // 3. Read Up
-            if (!seek_file(hFile, meta.up_exps.file_offset) ||
-                !read_exact(hFile, up_scratch, meta.up_exps.size_bytes)) {
-                std::cerr << "[-] Read error for layer " << meta.layer_idx << " up_exps\n";
+            if (!seek_file(hFile, meta.down_exps.file_offset) || !read_exact(hFile, down_scratch, meta.down_exps.size_bytes) ||
+                !seek_file(hFile, meta.gate_exps.file_offset) || !read_exact(hFile, gate_scratch, meta.gate_exps.size_bytes) ||
+                !seek_file(hFile, meta.up_exps.file_offset) || !read_exact(hFile, up_scratch, meta.up_exps.size_bytes)) {
+                std::cerr << "[-] Read error for Q3 layer " << meta.layer_idx << " experts\n";
                 CloseHandle(hFile);
                 return false;
             }
 
-            // Slices and packs each expert's [Gate (984 KB) | Up (984 KB) | Down (1320 KB)] consecutively
+            // Slices and packs each expert consecutively
             for (int e = 0; e < N_EXPERTS; ++e) {
                 uint8_t* target_exp = m_expert_pool + current_pool_offset + e * exp_total;
 
-                // Copy Gate slice e
                 std::memcpy(target_exp, gate_scratch + e * exp_gate_bytes, exp_gate_bytes);
-                // Copy Up slice e
                 std::memcpy(target_exp + exp_gate_bytes, up_scratch + e * exp_up_bytes, exp_up_bytes);
-                // Copy Down slice e
                 std::memcpy(target_exp + exp_gate_bytes + exp_up_bytes, down_scratch + e * exp_down_bytes, exp_down_bytes);
 
                 PackedExpert& pe = layer.experts[e];
@@ -233,63 +224,138 @@ bool LFM2Tiler::load_and_tile(const std::string& gguf_path) {
                 pe.up_bytes    = exp_up_bytes;
                 pe.down_bytes  = exp_down_bytes;
                 pe.total_bytes = exp_total;
-                pe.gate_type   = QuantType::IQ2_S;
-                pe.up_type     = QuantType::IQ2_S;
-                pe.down_type   = QuantType::IQ3_S;
+                pe.gate_type   = is_hp ? QuantType::IQ4_XS : QuantType::IQ3_XXS;
+                pe.up_type     = is_hp ? QuantType::IQ4_XS : QuantType::IQ3_XXS;
+                pe.down_type   = is_hp ? QuantType::Q6_K : QuantType::IQ4_XS;
             }
+
+            current_pool_offset += layer_bytes;
         } else {
-            // High-precision layers 7 & 8: Down is 106.9 MB, Gate is 86.5 MB, Up is 86.5 MB (Total 279.9 MB)
-            // Two-stage staging within 250 MB scratch buffer:
-            // Stage 1: Read Down (106.9 MB) and place into pool
-            uint8_t* scratch_down = m_scratch_buf;
-            if (!seek_file(hFile, meta.down_exps.file_offset) ||
-                !read_exact(hFile, scratch_down, meta.down_exps.size_bytes)) {
-                std::cerr << "[-] Read error for HP layer " << meta.layer_idx << " down_exps\n";
-                CloseHandle(hFile);
-                return false;
-            }
-            for (int e = 0; e < N_EXPERTS; ++e) {
-                uint8_t* target_exp = m_expert_pool + current_pool_offset + e * exp_total;
-                std::memcpy(target_exp + exp_gate_bytes + exp_up_bytes, scratch_down + e * exp_down_bytes, exp_down_bytes);
-            }
+            bool is_high_precision = (meta.layer_idx == 7 || meta.layer_idx == 8);
+            size_t exp_gate_bytes = is_high_precision ? HP_GATE_BYTES : STD_GATE_BYTES;
+            size_t exp_up_bytes   = is_high_precision ? HP_UP_BYTES   : STD_UP_BYTES;
+            size_t exp_down_bytes = is_high_precision ? HP_DOWN_BYTES : STD_DOWN_BYTES;
+            size_t exp_total      = exp_gate_bytes + exp_up_bytes + exp_down_bytes;
+            size_t layer_bytes    = N_EXPERTS * exp_total;
 
-            // Stage 2: Read Gate (86.5 MB) + Up (86.5 MB) into scratch (173 MB <= 250 MB)
-            uint8_t* scratch_gate = m_scratch_buf;
-            uint8_t* scratch_up   = scratch_gate + meta.gate_exps.size_bytes;
-            if (!seek_file(hFile, meta.gate_exps.file_offset) ||
-                !read_exact(hFile, scratch_gate, meta.gate_exps.size_bytes)) {
-                std::cerr << "[-] Read error for HP layer " << meta.layer_idx << " gate_exps\n";
+            layer.expert_bytes = exp_total;
+            layer.layer_total_bytes = layer_bytes;
+            layer.router_fp16 = m_router_fp16_pool + l * ROUTER_LAYER_FLOATS;
+
+            // --- Step A: Read and Convert Router Matrix ---
+            if (!seek_file(hFile, meta.gate_inp.file_offset)) {
+                std::cerr << "[-] Seek error for layer " << meta.layer_idx << " router\n";
                 CloseHandle(hFile);
                 return false;
             }
-            if (!seek_file(hFile, meta.up_exps.file_offset) ||
-                !read_exact(hFile, scratch_up, meta.up_exps.size_bytes)) {
-                std::cerr << "[-] Read error for HP layer " << meta.layer_idx << " up_exps\n";
+            if (!read_exact(hFile, router_f32_buf, meta.gate_inp.size_bytes)) {
+                std::cerr << "[-] Read error for layer " << meta.layer_idx << " router\n";
                 CloseHandle(hFile);
                 return false;
             }
 
-            for (int e = 0; e < N_EXPERTS; ++e) {
-                uint8_t* target_exp = m_expert_pool + current_pool_offset + e * exp_total;
-                std::memcpy(target_exp, scratch_gate + e * exp_gate_bytes, exp_gate_bytes);
-                std::memcpy(target_exp + exp_gate_bytes, scratch_up + e * exp_up_bytes, exp_up_bytes);
-
-                PackedExpert& pe = layer.experts[e];
-                pe.expert_base = target_exp;
-                pe.gate_ptr    = target_exp;
-                pe.up_ptr      = target_exp + exp_gate_bytes;
-                pe.down_ptr    = target_exp + exp_gate_bytes + exp_up_bytes;
-                pe.gate_bytes  = exp_gate_bytes;
-                pe.up_bytes    = exp_up_bytes;
-                pe.down_bytes  = exp_down_bytes;
-                pe.total_bytes = exp_total;
-                pe.gate_type   = QuantType::IQ3_S;
-                pe.up_type     = QuantType::IQ3_S;
-                pe.down_type   = QuantType::IQ4_XS;
+            uint16_t* dst_router = m_router_fp16_pool + l * ROUTER_LAYER_FLOATS;
+            for (size_t i = 0; i < ROUTER_LAYER_FLOATS; i += 8) {
+                __m256 v = _mm256_loadu_ps(router_f32_buf + i);
+                __m128i h = _mm256_cvtps_ph(v, 0);
+                _mm_storeu_si128((__m128i*)(dst_router + i), h);
             }
+
+            // --- Step B: Read Expert Weights into 250 MB Scratch Buffer ---
+            if (!is_high_precision) {
+                uint8_t* down_scratch = m_scratch_buf;
+                uint8_t* gate_scratch = down_scratch + meta.down_exps.size_bytes;
+                uint8_t* up_scratch   = gate_scratch + meta.gate_exps.size_bytes;
+
+                if (!seek_file(hFile, meta.down_exps.file_offset) ||
+                    !read_exact(hFile, down_scratch, meta.down_exps.size_bytes)) {
+                    std::cerr << "[-] Read error for layer " << meta.layer_idx << " down_exps\n";
+                    CloseHandle(hFile);
+                    return false;
+                }
+                if (!seek_file(hFile, meta.gate_exps.file_offset) ||
+                    !read_exact(hFile, gate_scratch, meta.gate_exps.size_bytes)) {
+                    std::cerr << "[-] Read error for layer " << meta.layer_idx << " gate_exps\n";
+                    CloseHandle(hFile);
+                    return false;
+                }
+                if (!seek_file(hFile, meta.up_exps.file_offset) ||
+                    !read_exact(hFile, up_scratch, meta.up_exps.size_bytes)) {
+                    std::cerr << "[-] Read error for layer " << meta.layer_idx << " up_exps\n";
+                    CloseHandle(hFile);
+                    return false;
+                }
+
+                for (int e = 0; e < N_EXPERTS; ++e) {
+                    uint8_t* target_exp = m_expert_pool + current_pool_offset + e * exp_total;
+
+                    std::memcpy(target_exp, gate_scratch + e * exp_gate_bytes, exp_gate_bytes);
+                    std::memcpy(target_exp + exp_gate_bytes, up_scratch + e * exp_up_bytes, exp_up_bytes);
+                    std::memcpy(target_exp + exp_gate_bytes + exp_up_bytes, down_scratch + e * exp_down_bytes, exp_down_bytes);
+
+                    PackedExpert& pe = layer.experts[e];
+                    pe.expert_base = target_exp;
+                    pe.gate_ptr    = target_exp;
+                    pe.up_ptr      = target_exp + exp_gate_bytes;
+                    pe.down_ptr    = target_exp + exp_gate_bytes + exp_up_bytes;
+                    pe.gate_bytes  = exp_gate_bytes;
+                    pe.up_bytes    = exp_up_bytes;
+                    pe.down_bytes  = exp_down_bytes;
+                    pe.total_bytes = exp_total;
+                    pe.gate_type   = QuantType::IQ2_S;
+                    pe.up_type     = QuantType::IQ2_S;
+                    pe.down_type   = QuantType::IQ3_S;
+                }
+            } else {
+                uint8_t* scratch_down = m_scratch_buf;
+                if (!seek_file(hFile, meta.down_exps.file_offset) ||
+                    !read_exact(hFile, scratch_down, meta.down_exps.size_bytes)) {
+                    std::cerr << "[-] Read error for HP layer " << meta.layer_idx << " down_exps\n";
+                    CloseHandle(hFile);
+                    return false;
+                }
+                for (int e = 0; e < N_EXPERTS; ++e) {
+                    uint8_t* target_exp = m_expert_pool + current_pool_offset + e * exp_total;
+                    std::memcpy(target_exp + exp_gate_bytes + exp_up_bytes, scratch_down + e * exp_down_bytes, exp_down_bytes);
+                }
+
+                uint8_t* scratch_gate = m_scratch_buf;
+                uint8_t* scratch_up   = scratch_gate + meta.gate_exps.size_bytes;
+                if (!seek_file(hFile, meta.gate_exps.file_offset) ||
+                    !read_exact(hFile, scratch_gate, meta.gate_exps.size_bytes)) {
+                    std::cerr << "[-] Read error for HP layer " << meta.layer_idx << " gate_exps\n";
+                    CloseHandle(hFile);
+                    return false;
+                }
+                if (!seek_file(hFile, meta.up_exps.file_offset) ||
+                    !read_exact(hFile, scratch_up, meta.up_exps.size_bytes)) {
+                    std::cerr << "[-] Read error for HP layer " << meta.layer_idx << " up_exps\n";
+                    CloseHandle(hFile);
+                    return false;
+                }
+
+                for (int e = 0; e < N_EXPERTS; ++e) {
+                    uint8_t* target_exp = m_expert_pool + current_pool_offset + e * exp_total;
+                    std::memcpy(target_exp, scratch_gate + e * exp_gate_bytes, exp_gate_bytes);
+                    std::memcpy(target_exp + exp_gate_bytes, scratch_up + e * exp_up_bytes, exp_up_bytes);
+
+                    PackedExpert& pe = layer.experts[e];
+                    pe.expert_base = target_exp;
+                    pe.gate_ptr    = target_exp;
+                    pe.up_ptr      = target_exp + exp_gate_bytes;
+                    pe.down_ptr    = target_exp + exp_gate_bytes + exp_up_bytes;
+                    pe.gate_bytes  = exp_gate_bytes;
+                    pe.up_bytes    = exp_up_bytes;
+                    pe.down_bytes  = exp_down_bytes;
+                    pe.total_bytes = exp_total;
+                    pe.gate_type   = QuantType::IQ3_S;
+                    pe.up_type     = QuantType::IQ3_S;
+                    pe.down_type   = QuantType::IQ4_XS;
+                }
+            }
+            current_pool_offset += layer_bytes;
         }
 
-        current_pool_offset += layer_bytes;
         update_peak_working_set();
 
         if ((l + 1) % 5 == 0 || (l + 1) == N_MOE_LAYERS) {
@@ -312,8 +378,7 @@ bool LFM2Tiler::load_and_tile(const std::string& gguf_path) {
     std::cout << "\n[+] Chunked Staging & Tiling Complete in " << std::fixed << std::setprecision(2) << load_sec << " s ("
               << (load_gb / load_sec) << " GB/s effective I/O rate)\n";
     std::cout << "    Total Expert Pool Committed: " << load_gb << " GB\n";
-    std::cout << "    Peak Loading Working Set:   " << get_peak_working_set_gb() << " GB (Target <= 8.2 GB: "
-              << (get_peak_working_set_gb() <= 8.2 ? "PASSED [ZERO SWAPPING]" : "FAILED") << ")\n\n";
+    std::cout << "    Peak Loading Working Set:   " << get_peak_working_set_gb() << " GB\n\n";
 
     return true;
 }

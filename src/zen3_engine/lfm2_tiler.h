@@ -21,21 +21,37 @@ constexpr int TOP_K = 4;
 constexpr int N_MOE_LAYERS = 38;
 constexpr int EXPERT_FFN_DIM = 1536;
 
-// Standard MoE Layer Expert Dimensions & Byte Sizes (36 layers)
+// Standard MoE Layer Expert Dimensions & Byte Sizes (IQ3_XXS model)
 constexpr size_t STD_GATE_BYTES = 1007616; // IQ2_S [2048, 1536]
 constexpr size_t STD_UP_BYTES   = 1007616; // IQ2_S [2048, 1536]
 constexpr size_t STD_DOWN_BYTES = 1351680; // IQ3_S [1536, 2048]
 constexpr size_t STD_EXPERT_BYTES = STD_GATE_BYTES + STD_UP_BYTES + STD_DOWN_BYTES; // 3,366,912 bytes (~3.21 MB)
 constexpr size_t STD_LAYER_BYTES  = N_EXPERTS * STD_EXPERT_BYTES;                   // 215,482,368 bytes (~205.5 MB)
 
-// High-Precision Layers 7 & 8 Expert Dimensions & Byte Sizes (2 layers)
+// High-Precision Layers 7 & 8 Expert Dimensions & Byte Sizes (IQ3_XXS model)
 constexpr size_t HP_GATE_BYTES = 1351680;  // IQ3_S [2048, 1536]
 constexpr size_t HP_UP_BYTES   = 1351680;  // IQ3_S [2048, 1536]
 constexpr size_t HP_DOWN_BYTES = 1671168;  // IQ4_XS [1536, 2048]
 constexpr size_t HP_EXPERT_BYTES = HP_GATE_BYTES + HP_UP_BYTES + HP_DOWN_BYTES;    // 4,374,528 bytes (~4.17 MB)
 constexpr size_t HP_LAYER_BYTES  = N_EXPERTS * HP_EXPERT_BYTES;                    // 279,969,792 bytes (~267.0 MB)
 
-// Total Contiguous Expert Pool: 36 standard + 2 high-precision layers
+// Q3_K_XL Standard Expert Dimensions (36 layers)
+constexpr size_t Q3_GATE_BYTES = 1204224; // IQ3_XXS [2048, 1536]
+constexpr size_t Q3_UP_BYTES   = 1204224; // IQ3_XXS [2048, 1536]
+constexpr size_t Q3_DOWN_BYTES = 1671168; // IQ4_XS [1536, 2048]
+constexpr size_t Q3_EXPERT_BYTES = Q3_GATE_BYTES + Q3_UP_BYTES + Q3_DOWN_BYTES; // 4,079,616 bytes (~3.89 MB)
+constexpr size_t Q3_LAYER_BYTES  = N_EXPERTS * Q3_EXPERT_BYTES;                   // 261,095,424 bytes (~249.0 MB)
+
+// Q3_K_XL High-Precision Layers 7 & 8 (2 layers)
+constexpr size_t Q3_HP_GATE_BYTES = 1671168; // IQ4_XS [2048, 1536]
+constexpr size_t Q3_HP_UP_BYTES   = 1671168; // IQ4_XS [2048, 1536]
+constexpr size_t Q3_HP_DOWN_BYTES = 2580480; // Q6_K   [1536, 2048]
+constexpr size_t Q3_HP_EXPERT_BYTES = Q3_HP_GATE_BYTES + Q3_HP_UP_BYTES + Q3_HP_DOWN_BYTES; // 5,922,816 bytes (~5.65 MB)
+constexpr size_t Q3_HP_LAYER_BYTES  = N_EXPERTS * Q3_HP_EXPERT_BYTES;                         // 379,060,224 bytes (~361.5 MB)
+
+constexpr size_t Q3_TOTAL_EXPERT_POOL_BYTES = 36ULL * Q3_LAYER_BYTES + 2ULL * Q3_HP_LAYER_BYTES; // 10,157,555,712 bytes (9.46 GiB)
+
+// Total Contiguous Expert Pool for IQ3_XXS model
 constexpr size_t TOTAL_EXPERT_POOL_BYTES = 36ULL * STD_LAYER_BYTES + 2ULL * HP_LAYER_BYTES; // 8,317,304,832 bytes (7.81 GB)
 
 // Router Matrix Pool: 38 layers * 64 experts * 2048 dim converted to FP16 (uint16_t)
@@ -43,8 +59,8 @@ constexpr size_t ROUTER_LAYER_FLOATS = N_EXPERTS * D_MODEL; // 131,072 floats
 constexpr size_t ROUTER_LAYER_FP16_BYTES = ROUTER_LAYER_FLOATS * sizeof(uint16_t); // 262,144 bytes (256 KB)
 constexpr size_t TOTAL_ROUTER_POOL_BYTES = N_MOE_LAYERS * ROUTER_LAYER_FP16_BYTES;  // 9,961,472 bytes (~9.73 MB)
 
-// Reusable Scratch Buffer Size: 250 MB
-constexpr size_t SCRATCH_BUFFER_BYTES = 250ULL * 1024ULL * 1024ULL; // 262,144,000 bytes
+// Reusable Scratch Buffer Size: 400 MB (fits all layer tensors in single pass)
+constexpr size_t SCRATCH_BUFFER_BYTES = 400ULL * 1024ULL * 1024ULL;
 
 // Quantization format enum
 enum class QuantType {
@@ -52,7 +68,9 @@ enum class QuantType {
     IQ3_S = 1,
     IQ4_XS = 2,
     FP32  = 3,
-    FP16  = 4
+    FP16  = 4,
+    IQ3_XXS = 5,
+    Q6_K = 6
 };
 
 // Contiguous Expert slice layout

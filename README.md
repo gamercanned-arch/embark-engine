@@ -81,7 +81,8 @@ All measurements conducted on standalone EMBARK engine binaries (`build/*_apu_en
 | **Groot 19B MoE** | `IQ3_XXS` | `groot_apu_engine` | **154.49 tok/s** (vs 25.35) | **27.19 tok/s** (vs 3.85) | 31.72 tok/s | L3 Resident (37.5% Hit Rate) |
 | **d1-2B** (Decision/Vision) | `Q4_K_M` | `d1_apu_engine` | **99.06 tok/s** (vs 57.78) | **21.07 tok/s** (vs 11.75) | 23.85 tok/s | 21.42 GB/s (Vision: 27.99 ms) |
 | **EmbeddingGemma-2** | `Q6_K_XL` | `embedding_apu_engine` | **363.56 tok/s** (Forward) | **464.60 tok/s** (E2E Multi) | 75.15 ms mmproj | 0.79 TFLOPS sustained |
-| **LFM 2.5 24B MoE** | `IQ3_XXS` | `zen3_apu_engine` | **155.50 tok/s** (vs 6.40) | **35.00 tok/s** (vs 3.13) | 45.47 tok/s | 16.68 GB/s Contiguous |
+| **LFM 2.5 24B MoE** | `IQ3_XXS` | `zen3_apu_engine` | **155.50 tok/s** (vs 6.40) | **35.00 tok/s** (vs 3.13) | 45.47 tok/s | 16.68 GB/s Contiguous (7.81 GB Pool) |
+| **LFM 2.5 24B MoE** | `Q3_K_XL` | `zen3_apu_engine` | **30.10 tok/s** (vs 6.40) | **29.74 tok/s** (vs 3.13) | 35.34 tok/s | 17.58 GB/s Contiguous (9.46 GB Pool) |
 
 ---
 

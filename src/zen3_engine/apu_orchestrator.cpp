@@ -243,8 +243,10 @@ bool APUOrchestrator::initialize() {
         std::cerr << "[-] Failed to wrap contiguous host buffer in OpenCL cl_mem!\n";
         return false;
     }
-    std::cout << "      [Zero-Copy UMA] 7.81 GB Host Memory Pool mapped to Vega 8 in "
-              << std::fixed << std::setprecision(2) << (map_us / 1000.0) << " ms (0 PCIe memcpys)!\n";
+    std::cout << "      [Zero-Copy UMA] " << std::fixed << std::setprecision(2)
+              << ((double)m_tiler.get_expert_pool_size() / (1024.0 * 1024.0 * 1024.0))
+              << " GB Host Memory Pool mapped to Vega 8 in "
+              << (map_us / 1000.0) << " ms (0 PCIe memcpys)!\n";
 
     // Warm L3 Router Cache
     m_tiler.warm_router_l3_cache();
@@ -417,7 +419,10 @@ DecodeBenchmarkResult APUOrchestrator::benchmark_decode(int num_tokens) {
     double min_ms = sorted.front();
     double p99_ms = sorted[std::min((size_t)(sorted.size() * 0.99), sorted.size() - 1)];
 
-    double total_bytes_per_token = 38.0 * (4.0 * (double)STD_EXPERT_BYTES); // ~495.6 MB per token
+    double total_bytes_per_token = 0.0;
+    for (int l = 0; l < N_MOE_LAYERS; ++l) {
+        total_bytes_per_token += (double)TOP_K * (double)m_tiler.get_layer(l).expert_bytes;
+    }
     double eff_bw_gb_s = ((total_bytes_per_token / (median_ms * 1e-3))) / (1024.0 * 1024.0 * 1024.0);
 
     update_peak_memory();
