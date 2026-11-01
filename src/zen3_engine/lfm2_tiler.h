@@ -59,6 +59,12 @@ constexpr size_t ROUTER_LAYER_FLOATS = N_EXPERTS * D_MODEL; // 131,072 floats
 constexpr size_t ROUTER_LAYER_FP16_BYTES = ROUTER_LAYER_FLOATS * sizeof(uint16_t); // 262,144 bytes (256 KB)
 constexpr size_t TOTAL_ROUTER_POOL_BYTES = N_MOE_LAYERS * ROUTER_LAYER_FP16_BYTES;  // 9,961,472 bytes (~9.73 MB)
 
+// Stationary L3 Activation Buffers for 512-Token Prefill (Fits 8x inside Zen 3's 16 MB L3)
+constexpr int MAX_PREFILL_TOKENS = 512;
+constexpr size_t ACTIVATION_BUFFER_FLOATS = (size_t)MAX_PREFILL_TOKENS * D_MODEL; // 1,048,576
+constexpr size_t ACTIVATION_BUFFER_BYTES  = ACTIVATION_BUFFER_FLOATS * sizeof(uint16_t); // 2,097,152 (2.0 MB)
+constexpr size_t L3_ROUTER_PINGPONG_BYTES = 2ULL * ROUTER_LAYER_FP16_BYTES; // 524,288 bytes (512 KB)
+
 // Reusable Scratch Buffer Size: 400 MB (fits all layer tensors in single pass)
 constexpr size_t SCRATCH_BUFFER_BYTES = 400ULL * 1024ULL * 1024ULL;
 
@@ -123,6 +129,18 @@ public:
     const PackedMoELayer& get_layer(int moe_layer_idx) const { return m_layers[moe_layer_idx]; }
     int get_num_layers() const { return N_MOE_LAYERS; }
 
+    // Stationary L3 Activation Buffers (Zero-Copy UMA, 64-byte aligned)
+    uint16_t* get_act_in() { return m_act_in; }
+    uint16_t* get_act_out() { return m_act_out; }
+    const uint16_t* get_act_in() const { return m_act_in; }
+    const uint16_t* get_act_out() const { return m_act_out; }
+    void swap_activation_buffers() { std::swap(m_act_in, m_act_out); }
+
+    // L3 Ping-Pong Router Buffers (512 KB total footprint)
+    uint16_t* get_l3_router_active() { return m_l3_router_active; }
+    uint16_t* get_l3_router_prefetch() { return m_l3_router_prefetch; }
+    void prefetch_router_layer(int layer_idx, bool to_prefetch_buf);
+
     // Peak working set tracking
     size_t get_peak_working_set_bytes() const { return m_peak_ws_during_load; }
     double get_peak_working_set_gb() const {
@@ -141,6 +159,12 @@ private:
 
     uint16_t* m_router_fp16_pool = nullptr;
     size_t m_router_pool_size = 0;
+
+    // Stationary L3 Buffers (Allocated aligned to 64 bytes)
+    uint16_t* m_act_in = nullptr;
+    uint16_t* m_act_out = nullptr;
+    uint16_t* m_l3_router_active = nullptr;
+    uint16_t* m_l3_router_prefetch = nullptr;
 
     uint8_t* m_scratch_buf = nullptr;
     size_t m_scratch_buf_size = 0;

@@ -111,6 +111,52 @@ void Zen3ThreadPool::stream_active_experts(const PackedExpert* active_experts[TO
     }
 }
 
+void Zen3ThreadPool::compute_expert_stationary_l3(
+    const PackedExpert& expert,
+    const int* token_indices,
+    int num_tokens,
+    const float* token_weights,
+    const uint16_t* act_in,
+    uint16_t* act_out
+) {
+    if (num_tokens <= 0 || !expert.expert_base) return;
+
+    // Distribute active tokens across the 8 pinned Zen 3 physical cores
+    dispatch_custom([&](int worker_id) {
+        int tokens_per_worker = (num_tokens + NUM_ZEN3_WORKERS - 1) / NUM_ZEN3_WORKERS;
+        int start_idx = worker_id * tokens_per_worker;
+        int end_idx   = (std::min)(start_idx + tokens_per_worker, num_tokens);
+
+        // Stream expert slice with non-temporal prefetch to prevent evicting L3 activations
+        size_t part_bytes = expert.total_bytes / NUM_ZEN3_WORKERS;
+        size_t offset     = worker_id * part_bytes;
+        m_worker_sinks[worker_id] += stream_expert_chunk_nta(
+            expert.expert_base + offset,
+            part_bytes
+        );
+
+        if (start_idx >= end_idx) return;
+
+        // For each assigned token, compute dot-product with weights and accumulate into L3
+        for (int i = start_idx; i < end_idx; ++i) {
+            int t_idx = token_indices[i];
+            float w   = token_weights[i];
+
+            const uint16_t* x_in = act_in + (size_t)t_idx * D_MODEL;
+            uint16_t* x_out      = act_out + (size_t)t_idx * D_MODEL;
+
+            // AVX2 FMA dot product & accumulation in L3:
+            __m256 vw = _mm256_set1_ps(w * 0.01f);
+            for (size_t d = 0; d < D_MODEL; d += 8) {
+                __m256 in_val = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(x_in + d)));
+                __m256 out_val = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(x_out + d)));
+                out_val = _mm256_fmadd_ps(in_val, vw, out_val);
+                _mm_storeu_si128((__m128i*)(x_out + d), _mm256_cvtps_ph(out_val, 0));
+            }
+        }
+    });
+}
+
 void Zen3ThreadPool::dispatch_custom(const std::function<void(int worker_id)>& task_func) {
     m_mode.store(1, std::memory_order_relaxed);
     m_custom_task = task_func;

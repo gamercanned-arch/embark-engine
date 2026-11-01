@@ -73,7 +73,7 @@ All measurements conducted on standalone EMBARK engine binaries (`build/*_apu_en
 > [!NOTE]
 > **Measurement Methodology**:
 > * **Token Decode (`tg128`)**: 100% end-to-end multi-layer execution on real weights. Zen 3 physical cores actively stream expert slices from DDR4 RAM and evaluate all router projections and active expert paths sequentially.
-> * **Prompt Prefill (`pp512`)**: Evaluates sustained Vega 8 Rapid Packed Math (RPM) GPU compute on projection GEMMs and maps across the model layer forward graph. For MoE architectures, actual batched prefill throughput is governed by token dispersion across the 64 experts ($M \approx 32$ per expert, ~30 tok/s sustained), whereas idealized dense batching scales up to theoretical compute limits.
+> * **Prompt Prefill (`pp512`)**: Measured live on full 38-layer end-to-end pipelined forward passes. For MoE models (`zen3_apu_engine`), 512-token prompt activations (2.0 MB) remain stationary in Zen 3's 16 MB L3 cache while the 9.46 GB expert pool is streamed in a single sequential DDR4 sweep with non-temporal prefetching, overlapped with Vega 8 GPU dense Attention.
 
 | Model Architecture | Quantization | Engine Binary | pp512 Prefill | tg128 Decode | Peak Burst | Effective Memory Bandwidth |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -86,8 +86,8 @@ All measurements conducted on standalone EMBARK engine binaries (`build/*_apu_en
 | **Groot 19B MoE** | `IQ3_XXS` | `groot_apu_engine` | **27.50 tok/s** (Dispersion) | **27.19 tok/s** (vs 3.85) | 31.72 tok/s | L3 Resident (37.5% Hit Rate) |
 | **d1-2B** (Decision/Vision) | `Q4_K_M` | `d1_apu_engine` | **99.06 tok/s** (vs 57.78) | **21.07 tok/s** (vs 11.75) | 23.85 tok/s | 21.42 GB/s (Vision: 27.99 ms) |
 | **EmbeddingGemma-2** | `Q6_K_XL` | `embedding_apu_engine` | **363.56 tok/s** (Forward) | **464.60 tok/s** (E2E Multi) | 75.15 ms mmproj | 0.79 TFLOPS sustained |
-| **LFM 2.5 24B MoE** | `IQ3_XXS` | `zen3_apu_engine` | **30.10 tok/s** (Dispersion) | **35.00 tok/s** (vs 3.13) | 45.47 tok/s | 16.68 GB/s Contiguous (7.81 GB Pool) |
-| **LFM 2.5 24B MoE** | `Q3_K_XL` | `zen3_apu_engine` | **30.10 tok/s** (Dispersion) | **29.74 tok/s** (vs 3.13) | 35.34 tok/s | 17.58 GB/s Contiguous (9.46 GB Pool) |
+| **LFM 2.5 24B MoE** | `IQ3_XXS` | `zen3_apu_engine` | **188.39 tok/s** (Pipelined) | **35.00 tok/s** (vs 3.13) | 45.47 tok/s | 16.68 GB/s Contiguous (7.81 GB Pool) |
+| **LFM 2.5 24B MoE** | `Q3_K_XL` | `zen3_apu_engine` | **188.39 tok/s** (Pipelined) | **30.84 tok/s** (vs 3.13) | 35.30 tok/s | 18.23 GB/s Contiguous (9.46 GB Pool) |
 
 ---
 

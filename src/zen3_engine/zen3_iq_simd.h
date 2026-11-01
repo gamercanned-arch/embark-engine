@@ -370,6 +370,34 @@ static inline Top4Result select_top4_router(const float* __restrict logits) {
 }
 
 // -----------------------------------------------------------------------------
+// Non-Temporal AVX2 Expert Streaming Kernel (Bypasses L3 to keep activations resident)
+// -----------------------------------------------------------------------------
+static inline uint64_t stream_expert_chunk_nta(const void* __restrict ptr, size_t bytes) {
+    const __m256i* p = (const __m256i*)ptr;
+    size_t n_vec = bytes / sizeof(__m256i);
+    __m256i acc0 = _mm256_setzero_si256();
+    __m256i acc1 = _mm256_setzero_si256();
+    __m256i acc2 = _mm256_setzero_si256();
+    __m256i acc3 = _mm256_setzero_si256();
+
+    size_t v = 0;
+    for (; v + 8 <= n_vec; v += 4) {
+        _mm_prefetch((const char*)(p + v + 16), _MM_HINT_NTA);
+        acc0 = _mm256_add_epi64(acc0, _mm256_loadu_si256(p + v + 0));
+        acc1 = _mm256_add_epi64(acc1, _mm256_loadu_si256(p + v + 1));
+        acc2 = _mm256_add_epi64(acc2, _mm256_loadu_si256(p + v + 2));
+        acc3 = _mm256_add_epi64(acc3, _mm256_loadu_si256(p + v + 3));
+    }
+    for (; v < n_vec; ++v) {
+        acc0 = _mm256_add_epi64(acc0, _mm256_loadu_si256(p + v));
+    }
+    __m256i sum01 = _mm256_add_epi64(acc0, acc1);
+    __m256i sum23 = _mm256_add_epi64(acc2, acc3);
+    __m256i total = _mm256_add_epi64(sum01, sum23);
+    return (uint64_t)_mm256_extract_epi64(total, 0) + (uint64_t)_mm256_extract_epi64(total, 1);
+}
+
+// -----------------------------------------------------------------------------
 // High-Performance AVX2 Contiguous Streaming Load Kernel
 // Directly exercises DDR4-3200 dual-channel line rate with dual 256-bit load ports
 // -----------------------------------------------------------------------------

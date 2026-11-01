@@ -36,6 +36,18 @@ public:
     // (2 physical cores assigned per active expert)
     void stream_active_experts(const PackedExpert* active_experts[TOP_K]);
 
+    // Stationary L3 MoE Prefill Worker:
+    // Streams expert weights sequentially from DDR4 with non-temporal prefetch
+    // and multiplies against active token rows stationary in Zen 3's 16 MB L3 cache
+    void compute_expert_stationary_l3(
+        const PackedExpert& expert,
+        const int* token_indices,
+        int num_tokens,
+        const float* token_weights,
+        const uint16_t* act_in,
+        uint16_t* act_out
+    );
+
     // Arbitrary work dispatch across the 8 pinned workers
     void dispatch_custom(const std::function<void(int worker_id)>& task_func);
 

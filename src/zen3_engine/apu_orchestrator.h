@@ -71,6 +71,9 @@ public:
     // Engine B: Vega 8 GPU Prompt Prefill (M >= 32)
     PrefillBenchmarkResult benchmark_prefill(int seq_len = 512, int num_iters = 10);
 
+    // Asynchronous APU Dual-Engine Pipelined Prefill (Stationary L3 Activations + Sequential DDR4 Sweep)
+    PrefillBenchmarkResult benchmark_pipelined_prefill(int seq_len = 512);
+
     // Engine A: Zen 3 AVX2 Contiguous MoE Decode (M = 1)
     DecodeBenchmarkResult benchmark_decode(int num_tokens = 64);
 
@@ -89,6 +92,8 @@ private:
     std::unique_ptr<zen3_engine::Vega8Context> m_vega8;
 
     cl_mem m_gpu_expert_pool = nullptr;
+    cl_mem m_gpu_act_in = nullptr;
+    cl_mem m_gpu_act_out = nullptr;
     cl_program m_gpu_program = nullptr;
     cl_kernel m_kernel_prefill = nullptr;
 

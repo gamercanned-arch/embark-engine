@@ -37,9 +37,37 @@ LFM2Tiler::LFM2Tiler() {
     m_expert_pool_size = TOTAL_EXPERT_POOL_BYTES;
     m_router_pool_size = TOTAL_ROUTER_POOL_BYTES;
     m_scratch_buf_size = SCRATCH_BUFFER_BYTES;
+
+    // Allocate stationary L3 activation buffers (2.0 MB each, 64-byte aligned for Zen 3 L3)
+    m_act_in  = (uint16_t*)_aligned_malloc(ACTIVATION_BUFFER_BYTES, 64);
+    m_act_out = (uint16_t*)_aligned_malloc(ACTIVATION_BUFFER_BYTES, 64);
+    if (m_act_in)  std::memset(m_act_in, 0, ACTIVATION_BUFFER_BYTES);
+    if (m_act_out) std::memset(m_act_out, 0, ACTIVATION_BUFFER_BYTES);
+
+    // Allocate L3 router ping-pong double-buffers (256 KB each = 512 KB total footprint)
+    m_l3_router_active   = (uint16_t*)_aligned_malloc(ROUTER_LAYER_FP16_BYTES, 64);
+    m_l3_router_prefetch = (uint16_t*)_aligned_malloc(ROUTER_LAYER_FP16_BYTES, 64);
+    if (m_l3_router_active)   std::memset(m_l3_router_active, 0, ROUTER_LAYER_FP16_BYTES);
+    if (m_l3_router_prefetch) std::memset(m_l3_router_prefetch, 0, ROUTER_LAYER_FP16_BYTES);
 }
 
 LFM2Tiler::~LFM2Tiler() {
+    if (m_act_in) {
+        _aligned_free(m_act_in);
+        m_act_in = nullptr;
+    }
+    if (m_act_out) {
+        _aligned_free(m_act_out);
+        m_act_out = nullptr;
+    }
+    if (m_l3_router_active) {
+        _aligned_free(m_l3_router_active);
+        m_l3_router_active = nullptr;
+    }
+    if (m_l3_router_prefetch) {
+        _aligned_free(m_l3_router_prefetch);
+        m_l3_router_prefetch = nullptr;
+    }
     if (m_scratch_buf) {
         VirtualFree(m_scratch_buf, 0, MEM_RELEASE);
         m_scratch_buf = nullptr;
@@ -63,11 +91,24 @@ void LFM2Tiler::update_peak_working_set() {
     }
 }
 
-void LFM2Tiler::warm_router_l3_cache() {
-    if (!m_router_fp16_pool) return;
-    const char* p = (const char*)m_router_fp16_pool;
-    for (size_t i = 0; i < m_router_pool_size; i += 64) {
+void LFM2Tiler::prefetch_router_layer(int layer_idx, bool to_prefetch_buf) {
+    if (!m_router_fp16_pool || layer_idx < 0 || layer_idx >= N_MOE_LAYERS) return;
+    uint16_t* dst = to_prefetch_buf ? m_l3_router_prefetch : m_l3_router_active;
+    const uint16_t* src = m_router_fp16_pool + (size_t)layer_idx * ROUTER_LAYER_FLOATS;
+    std::memcpy(dst, src, ROUTER_LAYER_FP16_BYTES);
+
+    // Warm router cache lines into L3:
+    const char* p = (const char*)dst;
+    for (size_t i = 0; i < ROUTER_LAYER_FP16_BYTES; i += 64) {
         _mm_prefetch(p + i, _MM_HINT_T0);
+    }
+}
+
+void LFM2Tiler::warm_router_l3_cache() {
+    // Pin active layer 0 and prefetch layer 1 into the 512 KB L3 ping-pong buffer
+    prefetch_router_layer(0, false);
+    if (N_MOE_LAYERS > 1) {
+        prefetch_router_layer(1, true);
     }
 }
 
