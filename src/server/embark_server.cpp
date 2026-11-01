@@ -121,9 +121,14 @@ void HttpServer::register_routes() {
                     sink.write(init_line.data(), init_line.size());
 
                     // Stream tokens
+                    std::string formatted_prompt = m_session_mgr.format_prompt(model, chat_msgs);
+                    if (formatted_prompt.empty()) {
+                        // Fallback: raw last user message
+                        formatted_prompt = chat_msgs.empty() ? "Hello" : chat_msgs.back().content;
+                    }
                     m_session_mgr.generate_stream(
                         model,
-                        chat_msgs.empty() ? "Hello" : chat_msgs.back().content,
+                        formatted_prompt,
                         params,
                         [&](const std::string& token_piece) {
                             json chunk = {
@@ -171,9 +176,13 @@ void HttpServer::register_routes() {
                 return;
             }
 
+            std::string formatted_prompt = m_session_mgr.format_prompt(model, chat_msgs);
+            if (formatted_prompt.empty()) {
+                formatted_prompt = chat_msgs.empty() ? "Hello" : chat_msgs.back().content;
+            }
             std::string content = m_session_mgr.generate_completion(
                 model,
-                chat_msgs.empty() ? "Hello" : chat_msgs.back().content,
+                formatted_prompt,
                 params
             );
 

@@ -71,6 +71,10 @@ public:
     std::vector<std::string> get_registered_models() const;
     ModelState get_model_state(const std::string& model_id) const;
 
+    // Format a chat message list into a model-specific prompt string
+    // using the model's embedded Jinja chat template via llama_chat_apply_template
+    std::string format_prompt(const std::string& model_id, const std::vector<ChatMessage>& messages) const;
+
     // Direct pre-load for resident models (LFM3 VL and LFM2 350M)
     bool preload_resident_models();
 
@@ -92,6 +96,20 @@ private:
     // Model weight staging locks
     std::mutex m_staging_mutex;
     std::string m_currently_staged_heavy_model;
+
+    // Live Model Pointers & Context Pools
+    llama_model* m_lfm2_model = nullptr;
+    std::vector<llama_context*> m_lfm2_contexts;
+    std::vector<bool> m_lfm2_busy;
+    std::mutex m_lfm2_ctx_mutex;
+
+    llama_model* m_lfm3_model = nullptr;
+    std::vector<llama_context*> m_lfm3_contexts;
+    std::vector<bool> m_lfm3_busy;
+    std::mutex m_lfm3_ctx_mutex;
+
+    llama_model* m_groot_model = nullptr;
+    llama_context* m_groot_ctx = nullptr;
 
     bool ensure_model_staged(const std::string& model_id);
     void unstage_heavy_model_if_needed(const std::string& next_heavy_model);
