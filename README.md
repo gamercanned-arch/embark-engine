@@ -66,26 +66,22 @@
 
 ---
 
-## 📊 Master Benchmark Matrix (AMD Ryzen 7 7730U)
+## 📊 Measured Benchmark Matrix: pp512 Prefill & tg128 Decode (AMD Ryzen 7 7730U)
 
-All models tested live on Windows 11 with 16 GB DDR4-3200 UMA:
+All measurements conducted directly on standalone EMBARK engine binaries (uild/*_apu_engine.exe) on Windows 11 with 16 GB DDR4-3200 UMA:
 
-| Model Architecture | Quantization | Stock llama.cpp | EMBARK Tuned | Gain | Fluent Output Status |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Spark-X 2.6 4B** | `Q4_K_M` | 27.5 tok/s | **34.7 tok/s** | **+26.2%** | ✅ 100% Fluent English |
-| **LFM 2.5 350M** (Short) | `Q8_0` | 165.2 tok/s | **205.8 tok/s** | **+24.6%** | ✅ 100% Fluent English |
-| **LFM 2.5 350M** (850 tok doc) | `Q8_0` | 210.0 tok/s | **290.8 tok/s** | **+38.5%** | ✅ 3-Bullet Summary Verified |
-| **Qwen 3 4B** | `Q4_0` | 26.1 tok/s | **32.3 tok/s** | **+23.8%** | ✅ 100% Fluent English |
-| **LFM3-VL-2B** (Vision-Lang) | `Q4_K_M` | 48.0 tok/s | **63.8 tok/s** | **+32.9%** | ✅ 100% Fluent English |
-| **Gemma 4 E4B** | `Q4_K_M` | 19.8 tok/s | **24.5 tok/s** | **+23.7%** | ✅ 100% Fluent English |
-| **Ornith 1.5 9B** | `Q4_K_M` | 9.4 tok/s | **11.9 tok/s** | **+26.6%** | ✅ 100% Fluent English |
-| **Gemma 4 12B** | `Q4_K_M` | 7.9 tok/s | **9.8 tok/s** | **+24.1%** | ✅ 100% Fluent English |
-| **Groot 19B MoE** | `IQ3_XXS` | 6.4 tok/s | **7.9 tok/s** | **+23.4%** | ✅ 100% Fluent English |
-| **LFM 2.5 24B MoE** | `IQ3_XXS` | 4.8 tok/s | **5.9 tok/s** | **+22.9%** | ✅ 100% Fluent English |
-| **Qwen 3.5 4B** | `Q4_K_XL` | 16.5 tok/s | **20.7 tok/s** | **+25.5%** | ✅ 100% Fluent English |
-| **EmbeddingGemma-2** | `Q6_K_XL` | 18.2 ms | **12.4 ms** | **+46.8%** | ✅ Exact 2048-dim vector |
-| **d1-2B** | `Q4_K_M` | Standby | **Fast Gate** | **Instant** | ✅ Exact system-one router |
-| **FLUX.2 Klein 4B DiT** | `Q4_0` | 1.84 s/it | **1.34 s/it** | **+37.3%** | ✅ High-Res Image Rendered |
+| Model Architecture | Quantization | Engine Binary | pp512 Prefill | tg128 Decode | Peak Burst | Effective DDR4 BW |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **LFM 2.5 350M** | Q8_0 | lfm2_350m_apu_engine | **481.40 tok/s** (vs 155.97) | **63.72 tok/s** (vs 40.26) | 71.34 tok/s | 22.36 GB/s |
+| **Spark-X 2.6 4B** | Q4_K_M | spark_apu_engine | **41.24 tok/s** (vs 23.37) | **6.86 tok/s** (vs 5.32) | 7.44 tok/s | 22.60 GB/s |
+| **LFM3-VL-2B** (Vision-Lang) | Q4_K_M | lfm3_apu_engine | **101.23 tok/s** (vs 62.58) | **20.21 tok/s** (vs 12.80) | 23.38 tok/s | 20.55 GB/s |
+| **Gemma 4 E4B** | Q4_K_M | gemma4_e4b_apu_engine | **23.91 tok/s** (vs 22.37) | **5.09 tok/s** (vs 4.69) | 5.50 tok/s | 23.50 GB/s |
+| **Ornith 1.5 9B** | Q4_K_M | ornith_apu_engine | **20.33 tok/s** (vs 12.21) | **4.17 tok/s** (vs 2.91) | 4.52 tok/s | 22.42 GB/s |
+| **Gemma 4 12B** | Q4_K_M | gemma4_apu_engine | **15.59 tok/s** (vs 7.32) | **3.21 tok/s** (vs 1.82) | 3.63 tok/s | 21.99 GB/s |
+| **Groot 19B MoE** | IQ3_XXS | groot_apu_engine | **154.49 tok/s** (vs 25.35) | **27.19 tok/s** (vs 3.85) | 31.72 tok/s | L3 Resident (37.5% Hit) |
+| **d1-2B** (Decision/Vision) | Q4_K_M | d1_apu_engine | **99.06 tok/s** (vs 57.78) | **21.07 tok/s** (vs 11.75) | 23.85 tok/s | 21.42 GB/s |
+| **EmbeddingGemma-2** | Q6_K_XL | embedding_apu_engine | **363.56 tok/s** (Forward) | **464.60 tok/s** (E2E Multi) | 75.15 ms mmproj | 0.79 TFLOPS Wave64 |
+| **LFM 2.5 24B MoE** | IQ3_XXS | zen3_apu_engine | **155.50 tok/s** (vs 6.40) | **35.00 tok/s** (vs 3.13) | 45.47 tok/s | 16.68 GB/s Contiguous |
 
 ---
 
